@@ -53,6 +53,7 @@ BEHAVIOR RULES:
 Your primary goal is to help each student understand their performance and guide them toward success.
 """
 
+@tool
 def get_attendance_data_impl(student_id_param: str) -> str:
     """Fetch the student's attendance record."""
     profile = get_student_profile(student_id_param)
@@ -80,6 +81,7 @@ def get_attendance_data_impl(student_id_param: str) -> str:
     
     return "\n".join(output)
 
+@tool
 def get_exam_scores_data_impl(student_id_param: str) -> str:
     """Fetch the student's exam scores and marks."""
     profile = get_student_profile(student_id_param)
@@ -120,6 +122,7 @@ def get_exam_scores_data_impl(student_id_param: str) -> str:
     
     return "\n".join(output)
 
+@tool
 def get_exam_schedule_data_impl(student_id_param: str) -> str:
     """Fetch the student's upcoming exam schedule."""
     profile = get_student_profile(student_id_param)
@@ -137,6 +140,7 @@ def get_exam_schedule_data_impl(student_id_param: str) -> str:
     
     return "\n".join(output)
 
+@tool
 def get_student_roster_data_impl(student_id_param: str) -> str:
     """Fetch the student's basic profile information."""
     profile = get_student_profile(student_id_param)
@@ -155,6 +159,7 @@ def get_student_roster_data_impl(student_id_param: str) -> str:
     ]
     
     return "\n".join(output)
+
 
 def build_conversation_agent(*, student_id: str = "", student_name: str = ""):
     """Build a ReAct-style agent that intelligently calls tools based on student questions."""
