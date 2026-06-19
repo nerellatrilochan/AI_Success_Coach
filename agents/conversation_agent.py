@@ -3,23 +3,16 @@ from langchain_core.tools import tool
 from config.llm import get_llm
 from services.google_sheets_service import get_student_profile
 from services.rag_service import initialize_rag_service
+from prompts.system_prompts import (
+    get_student_data_system_prompt,
+    get_knowledge_base_system_prompt,
+    get_general_question_system_prompt,
+    get_off_topic_response,
+    validate_input
+)
 import json
 
-SYSTEM_PROMPT = """
-You are Success Coach AI, an intelligent assistant designed to support college and university students with their academic success.
-
-Your mission is to help students excel academically, professionally, and personally.
-
-CORE RESPONSIBILITIES:
-1. Answer questions about student-specific data (attendance, exam scores, exams, profile)
-2. Answer questions about CCBP Academy features, learning portal, courses, and platform guidance
-3. Provide academic guidance and study tips
-4. Help with career planning and professional development
-5. Offer time management and productivity advice
-6. Support skill development and learning
-"""
-
-# Initialize RAG service globally (once) - with force_rebuild on first run
+# Initialize RAG service globally (once)
 rag_service = None
 rag_initialized = False
 
@@ -37,7 +30,7 @@ def get_rag_service(force_rebuild: bool = False):
 
 
 # ============================================================================
-# TOOL DECORATED FUNCTIONS WITH PROPER IMPLEMENTATION
+# TOOL DECORATED FUNCTIONS
 # ============================================================================
 
 @tool
@@ -45,12 +38,6 @@ def get_attendance_data(student_id: str) -> str:
     """
     Fetch the student's detailed attendance record including weekly breakdown, 
     classes attended/scheduled, attendance percentages, and overall statistics.
-    
-    Args:
-        student_id: The unique student identifier
-        
-    Returns:
-        Formatted attendance report with statistics
     """
     profile = get_student_profile(student_id)
     attendance = profile.get("attendance", [])
@@ -66,7 +53,6 @@ def get_attendance_data(student_id: str) -> str:
         pct = record.get('attendance_pct', 'N/A')
         output.append(f"  • Week of {week}: {attended}/{scheduled} classes ({pct}%)")
     
-    # Calculate overall statistics
     try:
         total_attended = sum(int(r.get('classes_attended', 0)) for r in attendance if r.get('classes_attended', ''))
         total_scheduled = sum(int(r.get('classes_scheduled', 0)) for r in attendance if r.get('classes_scheduled', ''))
@@ -81,14 +67,7 @@ def get_attendance_data(student_id: str) -> str:
 @tool
 def get_exam_scores(student_id: str) -> str:
     """
-    Fetch the student's exam scores, marks, percentages, dates, and analysis 
-    of strongest and weakest subjects with statistics.
-    
-    Args:
-        student_id: The unique student identifier
-        
-    Returns:
-        Formatted exam scores report with analysis
+    Fetch the student's exam scores, marks, percentages, dates, and analysis.
     """
     profile = get_student_profile(student_id)
     exam_scores = profile.get("exam_scores", [])
@@ -109,7 +88,6 @@ def get_exam_scores(student_id: str) -> str:
         
         output.append(f"  • {subject}: {obtained}/{max_score} ({pct}%) - Exam date: {date}")
     
-    # Calculate statistics
     if percentages:
         avg_pct = sum(percentages) / len(percentages)
         max_pct = max(percentages)
@@ -120,7 +98,6 @@ def get_exam_scores(student_id: str) -> str:
         output.append(f"    Highest Score: {max_pct}%")
         output.append(f"    Lowest Score: {min_pct}%")
         
-        # Find strongest and weakest subjects
         strongest = exam_scores[percentages.index(max_pct)]['subject']
         weakest = exam_scores[percentages.index(min_pct)]['subject']
         output.append(f"    Strongest Subject: {strongest} ({max_pct}%)")
@@ -132,13 +109,7 @@ def get_exam_scores(student_id: str) -> str:
 @tool
 def get_exam_schedule(student_id: str) -> str:
     """
-    Fetch the student's upcoming exam schedule including subjects, dates, and exam types.
-    
-    Args:
-        student_id: The unique student identifier
-        
-    Returns:
-        Formatted upcoming exams list
+    Fetch the student's upcoming exam schedule.
     """
     profile = get_student_profile(student_id)
     exam_schedule = profile.get("exam_schedule", [])
@@ -159,14 +130,7 @@ def get_exam_schedule(student_id: str) -> str:
 @tool
 def get_student_roster(student_id: str) -> str:
     """
-    Fetch the student's basic profile information including name, student ID, 
-    program, cohort, and manager email.
-    
-    Args:
-        student_id: The unique student identifier
-        
-    Returns:
-        Formatted student profile information
+    Fetch the student's basic profile information.
     """
     profile = get_student_profile(student_id)
     roster = profile.get("roster", {})
@@ -189,24 +153,7 @@ def get_student_roster(student_id: str) -> str:
 @tool
 def search_knowledge_base(query: str) -> str:
     """
-    Search the CCBP Academy knowledge base to answer questions about:
-    - Learning Portal features and access (learning.ccbp.in, login, OTP)
-    - Home Page (dashboard, events, performance metrics)
-    - My Journey (growth cycles, milestones, progress tracking)
-    - Course Exams (schedules, how they work, retakes, grading)
-    - Course Certificates (eligibility, issuance, access)
-    - Search functionality and content discovery
-    - Bookmarks (saving and accessing questions)
-    - Bonus Courses (additional learning opportunities)
-    - LastMinute Pro (placement preparation)
-    
-    Use this tool for any questions about CCBP Academy features and platform functionality.
-    
-    Args:
-        query: The student's question about CCBP Academy
-        
-    Returns:
-        Comprehensive answer based on knowledge base content
+    Search the CCBP Academy knowledge base.
     """
     try:
         print(f"\n{'='*70}")
@@ -232,44 +179,41 @@ def search_knowledge_base(query: str) -> str:
 
 
 # ============================================================================
-# IMPROVED QUESTION CLASSIFIER
+# ENHANCED QUESTION CLASSIFIER
 # ============================================================================
 
 def classify_question(question: str, student_id: str) -> dict:
     """
-    Intelligent question classifier that routes to appropriate tool
-    
-    Returns:
-        {
-            "type": "student_data" | "knowledge_base" | "general",
-            "tools_to_use": list of tool names,
-            "parameters": dict of parameters,
-            "confidence": float between 0 and 1
-        }
+    Intelligent question classifier with guardrails
     """
-    question_lower = question.lower()
+    question_lower = question.lower().strip()
     
-    # Enhanced keywords for student data queries
-    student_keywords = {
-        "attendance": [
-            "attendance", "attend", "classes", "missed", "absent", "skipped",
-            "week", "how many classes", "absent too much"
-        ],
-        "scores": [
-            "score", "marks", "exam score", "percentage", "subject", "strong", "weak",
-            "average", "highest", "lowest", "performance", "how did i score", "what are my marks"
-        ],
-        "schedule": [
-            "exam", "schedule", "when", "upcoming", "test date", "next exam",
-            "do i have", "any exams", "exam timing"
-        ],
-        "profile": [
-            "profile", "name", "program", "cohort", "manager", "student id", 
-            "tell me about myself", "who is my manager"
-        ],
-    }
+    # Profile-related keywords (HIGHEST PRIORITY)
+    profile_keywords = [
+        "who am i", "who i am", "tell me about myself", "my profile",
+        "who is my", "what is my name", "my student id", "my program",
+        "my cohort", "my manager", "about me", "tell me who i am"
+    ]
     
-    # Enhanced keywords for knowledge base queries
+    # Attendance-related keywords
+    attendance_keywords = [
+        "attendance", "attend", "classes", "missed", "absent", "skipped",
+        "week", "how many classes", "absent too much"
+    ]
+    
+    # Exam scores keywords
+    scores_keywords = [
+        "score", "marks", "exam score", "percentage", "subject", "strong", "weak",
+        "average", "highest", "lowest", "performance", "how did i score", "what are my marks"
+    ]
+    
+    # Exam schedule keywords
+    schedule_keywords = [
+        "exam", "schedule", "when", "upcoming", "test date", "next exam",
+        "do i have", "any exams", "exam timing"
+    ]
+    
+    # Knowledge base keywords
     kb_keywords = [
         # Portal and access
         "learning.ccbp.in", "learning portal", "how to access", "login", "otp",
@@ -287,42 +231,88 @@ def classify_question(question: str, student_id: str) -> dict:
         "milestone", "internship", "placement", "job opportunity", "career",
         
         # Course Exams
-        "course exam", "exam", "exam schedule", "exam timing", "exam date",
-        "retake", "camera", "grading", "grades", "pass exam", "exam tips",
+        "course exam", "exam guide", "exam schedule", "exam timing", "exam date",
+        "retake", "camera", "grading", "grades", "pass exam",
         
         # Certificates
         "certificate", "course certificate", "eligibility", "completion",
-        "100% course", "certificate access", "email certificate",
+        "100% course", "certificate access",
         
         # Search
         "search", "find content", "content discovery", "search option",
         
         # Bookmarks
-        "bookmark", "save question", "saved questions", "bookmarked",
+        "bookmark", "save question", "saved questions",
         
         # Bonus courses
-        "bonus course", "extra learning", "advanced topics", "foundation",
-        "programming course", "interview readiness",
+        "bonus course", "extra learning", "advanced topics",
         
         # LastMinute Pro
-        "lastminute", "placement", "off-campus", "mock interview", "mock test",
-        "interview prep", "resume", "project", "company preparation",
+        "lastminute", "placement", "off-campus", "mock interview",
         
-        # General questions
-        "what is", "how do i", "tell me about", "explain", "how does",
-        "guide", "steps", "instructions", "how to", "feature", "overview"
+        # General KB
+        "what is", "tell me about", "explain", "how does", "feature", "overview"
     ]
     
-    # Check for student data keywords
-    for category, keywords in student_keywords.items():
-        for keyword in keywords:
-            if keyword in question_lower:
+    # OFF-TOPIC detection (BLOCK THESE)
+    off_topic_keywords = [
+        "python", "java", "javascript", "code", "program", "software",
+        "math", "science", "english", "history", "chemistry", "physics",
+        "solve", "calculate", "write code", "homework help", "do my assignment",
+        "hack", "exploit", "password", "secret"
+    ]
+    
+    # Check for off-topic questions
+    for keyword in off_topic_keywords:
+        if keyword in question_lower:
+            # If it's genuinely about learning (kb), allow it
+            if not any(kb in question_lower for kb in ["learning", "course", "platform", "portal"]):
                 return {
-                    "type": "student_data",
-                    "tools_to_use": [category],
-                    "parameters": {"student_id": student_id},
+                    "type": "off_topic",
+                    "tools_to_use": [],
+                    "parameters": {},
                     "confidence": 0.95
                 }
+    
+    # Check for profile keywords (HIGHEST PRIORITY)
+    for keyword in profile_keywords:
+        if keyword in question_lower:
+            return {
+                "type": "student_data",
+                "tools_to_use": ["profile"],
+                "parameters": {"student_id": student_id},
+                "confidence": 0.95
+            }
+    
+    # Check for attendance keywords
+    for keyword in attendance_keywords:
+        if keyword in question_lower:
+            return {
+                "type": "student_data",
+                "tools_to_use": ["attendance"],
+                "parameters": {"student_id": student_id},
+                "confidence": 0.95
+            }
+    
+    # Check for exam scores keywords
+    for keyword in scores_keywords:
+        if keyword in question_lower:
+            return {
+                "type": "student_data",
+                "tools_to_use": ["scores"],
+                "parameters": {"student_id": student_id},
+                "confidence": 0.95
+            }
+    
+    # Check for exam schedule keywords
+    for keyword in schedule_keywords:
+        if keyword in question_lower:
+            return {
+                "type": "student_data",
+                "tools_to_use": ["schedule"],
+                "parameters": {"student_id": student_id},
+                "confidence": 0.95
+            }
     
     # Check for knowledge base keywords
     for keyword in kb_keywords:
@@ -334,11 +324,11 @@ def classify_question(question: str, student_id: str) -> dict:
                 "confidence": 0.95
             }
     
-    # Default to knowledge base for ambiguous questions (better to use KB than miss it)
+    # Default: treat as general or knowledge base
     return {
-        "type": "knowledge_base",
-        "tools_to_use": ["search_knowledge_base"],
-        "parameters": {"query": question},
+        "type": "general",
+        "tools_to_use": [],
+        "parameters": {},
         "confidence": 0.5
     }
 
@@ -349,19 +339,11 @@ def classify_question(question: str, student_id: str) -> dict:
 
 def build_conversation_agent(*, student_id: str = "", student_name: str = ""):
     """
-    Build a conversation agent that intelligently routes questions to appropriate tools.
-    
-    Args:
-        student_id: The student's unique identifier
-        student_name: The student's name
-        
-    Returns:
-        A function that processes user messages and returns responses
+    Build a conversation agent with proper routing and guardrails
     """
     
     llm = get_llm()
     
-    # Define all available tools
     tools_map = {
         "attendance": get_attendance_data,
         "scores": get_exam_scores,
@@ -371,24 +353,20 @@ def build_conversation_agent(*, student_id: str = "", student_name: str = ""):
     }
     
     def run(user_message: str, history: list[dict]) -> str:
-        """
-        Process user message and generate response.
-        
-        Args:
-            user_message: The student's question
-            history: Conversation history
-            
-        Returns:
-            The assistant's response
-        """
+        """Process user message and generate response"""
         
         try:
+            # Validate input
+            is_valid, error_message = validate_input(user_message)
+            if not is_valid:
+                return f"⚠️ {error_message}"
+            
             print(f"\n{'='*70}")
-            print(f"📨 NEW MESSAGE FROM STUDENT")
+            print(f"📨 NEW MESSAGE FROM STUDENT: {student_name}")
             print(f"Message: {user_message}")
             print(f"{'='*70}\n")
             
-            # Step 1: Classify the question
+            # Classify question
             classification = classify_question(user_message, student_id)
             question_type = classification["type"]
             tools_to_use = classification["tools_to_use"]
@@ -398,9 +376,9 @@ def build_conversation_agent(*, student_id: str = "", student_name: str = ""):
             print(f"📊 Classification: {question_type.upper()} (confidence: {confidence:.1%})")
             print(f"   Tools: {tools_to_use}\n")
             
-            # Step 2: Handle based on question type
-            if question_type == "general":
-                return _answer_general_question(llm, user_message, history, student_name)
+            # Handle by type
+            if question_type == "off_topic":
+                return get_off_topic_response()
             
             elif question_type == "student_data":
                 return _answer_student_question(llm, user_message, history, tools_to_use, student_id, student_name)
@@ -408,6 +386,9 @@ def build_conversation_agent(*, student_id: str = "", student_name: str = ""):
             elif question_type == "knowledge_base":
                 return _answer_knowledge_base_question(user_message)
             
+            else:  # general
+                return _answer_general_question(llm, user_message, history, student_name)
+        
         except Exception as e:
             print(f"❌ Error in agent: {str(e)}")
             import traceback
@@ -418,38 +399,11 @@ def build_conversation_agent(*, student_id: str = "", student_name: str = ""):
 
 
 # ============================================================================
-# HELPER FUNCTIONS FOR DIFFERENT QUESTION TYPES
+# HANDLER FUNCTIONS
 # ============================================================================
 
-def _answer_general_question(llm, user_message: str, history: list[dict], student_name: str) -> str:
-    """Handle general questions without tools"""
-    
-    history_text = ""
-    if history:
-        history_text = "CONVERSATION HISTORY:\n"
-        for turn in history:
-            history_text += f"User: {turn['user']}\nAssistant: {turn['assistant']}\n\n"
-    
-    system_prompt = f"""You are Success Coach AI, helping {student_name} with their academic journey.
-
-This is a general question not about specific student data or platform features.
-
-Provide helpful, encouraging advice based on the question. Be supportive and practical.
-
-{history_text if history_text else "This is the start of the conversation."}
-"""
-    
-    messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_message)
-    ]
-    
-    response = llm.invoke(messages).content
-    return response
-
-
 def _answer_student_question(llm, user_message: str, history: list[dict], tools_to_use: list, student_id: str, student_name: str) -> str:
-    """Handle student data questions using appropriate tools"""
+    """Handle student data questions"""
     
     tools_map = {
         "attendance": get_attendance_data,
@@ -458,7 +412,7 @@ def _answer_student_question(llm, user_message: str, history: list[dict], tools_
         "profile": get_student_roster,
     }
     
-    # Fetch data from all identified tools
+    # Fetch data from tools
     tool_results = {}
     for tool_name in tools_to_use:
         if tool_name in tools_map:
@@ -474,30 +428,20 @@ def _answer_student_question(llm, user_message: str, history: list[dict], tools_
         for name, result in tool_results.items()
     ])
     
-    # Create prompt with tool results
-    history_text = ""
+    # Get system prompt
+    system_prompt = get_student_data_system_prompt(
+        student_name=student_name,
+        student_data_text=tool_results_text
+    )
+    
+    messages = [SystemMessage(content=system_prompt)]
+    
     if history:
-        history_text = "CONVERSATION HISTORY:\n"
         for turn in history:
-            history_text += f"User: {turn['user']}\nAssistant: {turn['assistant']}\n\n"
+            messages.append(HumanMessage(content=turn["user"]))
+            messages.append(AIMessage(content=turn["assistant"]))
     
-    system_prompt = f"""You are Success Coach AI helping {student_name} understand their academic performance.
-
-You have fetched the following data for this student:
-
-{tool_results_text}
-
----
-
-Now answer the student's question using this data. Be specific with numbers and provide actionable insights.
-
-{history_text if history_text else "This is the start of the conversation."}
-"""
-    
-    messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_message)
-    ]
+    messages.append(HumanMessage(content=user_message))
     
     response = llm.invoke(messages).content
     return response
@@ -510,7 +454,25 @@ def _answer_knowledge_base_question(user_message: str) -> str:
         result = search_knowledge_base.invoke({"query": user_message})
         return result
     except Exception as e:
-        print(f"❌ Error in _answer_knowledge_base_question: {str(e)}")
+        print(f"❌ Error in KB search: {str(e)}")
         import traceback
         traceback.print_exc()
         return f"I encountered an error while searching the knowledge base: {str(e)}"
+
+
+def _answer_general_question(llm, user_message: str, history: list[dict], student_name: str) -> str:
+    """Handle general questions"""
+    
+    system_prompt = get_general_question_system_prompt(student_name=student_name)
+    
+    messages = [SystemMessage(content=system_prompt)]
+    
+    if history:
+        for turn in history:
+            messages.append(HumanMessage(content=turn["user"]))
+            messages.append(AIMessage(content=turn["assistant"]))
+    
+    messages.append(HumanMessage(content=user_message))
+    
+    response = llm.invoke(messages).content
+    return response
