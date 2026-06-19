@@ -69,7 +69,7 @@ class Mem0SessionService:
                 print("⚠️  No valid messages to save")
                 return None
             
-            # Build metadata - NO 'type' field in filters!
+            # Build metadata
             session_metadata = {
                 "session_id": session_id,
                 "student_name": student_name,
@@ -90,12 +90,10 @@ class Mem0SessionService:
             print(f"{'='*70}\n")
             
             # Save with infer=True (default)
-            # This makes Mem0 extract structured facts, not store raw chat
             result = self.client.add(
                 messages=messages,
                 user_id=student_id,
                 metadata=session_metadata,
-                # infer=True is DEFAULT - Mem0 extracts key facts automatically
             )
             
             memory_ids = result.get("memory_ids") if isinstance(result, dict) else None
@@ -118,9 +116,6 @@ class Mem0SessionService:
         """
         Retrieve previous sessions for a student.
         
-        IMPORTANT: Only uses 'user_id' filter - NO 'type' filter!
-        The 'type' filter is NOT supported by Mem0 API.
-        
         Args:
             student_id: Student identifier
             limit: Maximum number of sessions to retrieve
@@ -131,7 +126,6 @@ class Mem0SessionService:
         try:
             print(f"\n🔎 Loading previous sessions for student {student_id}...\n")
             
-            # FIXED: ONLY use 'user_id' filter - removed 'type' filter!
             results = self.client.search(
                 query="session coaching chat history",
                 filters={
@@ -184,6 +178,134 @@ class Mem0SessionService:
         except Exception as e:
             print(f"⚠️  Error searching sessions: {str(e)}")
             return []
+
+    def get_student_memory_context(
+        self,
+        student_id: str
+    ) -> Dict[str, Any]:
+        """
+        Comprehensive memory retrieval for a student.
+        Returns structured memory with factual insights + session summaries.
+        
+        Returns:
+            {
+                "session_count": int,
+                "factual_memory": str,  # Extracted patterns, triggers, solutions
+                "session_summaries": str,  # What was discussed
+                "raw_memories": list,  # All memories from Mem0
+                "first_time": bool  # True if this is their first session
+            }
+        """
+        try:
+            # Retrieve all memories for this student
+            results = self.client.search(
+                query="student profile stress triggers coping strategies solutions patterns",
+                filters={
+                    "user_id": student_id
+                },
+                top_k=50  # Get more results to analyze
+            )
+            
+            memories = results.get("results", []) if results else []
+            session_count = len(memories)
+            
+            if session_count == 0:
+                return {
+                    "session_count": 0,
+                    "factual_memory": "",
+                    "session_summaries": "",
+                    "raw_memories": [],
+                    "first_time": True
+                }
+            
+            print(f"\n{'='*70}")
+            print(f"📚 MEMORY CONTEXT FOR STUDENT {student_id}")
+            print(f"   Total Sessions: {session_count}")
+            print(f"{'='*70}\n")
+            
+            # Extract factual memory and session summaries
+            factual_memory = self._extract_factual_memory(memories)
+            session_summaries = self._extract_session_summaries(memories)
+            
+            return {
+                "session_count": session_count,
+                "factual_memory": factual_memory,
+                "session_summaries": session_summaries,
+                "raw_memories": memories,
+                "first_time": False
+            }
+        
+        except Exception as e:
+            print(f"⚠️  Error retrieving memory context: {str(e)}\n")
+            return {
+                "session_count": 0,
+                "factual_memory": "",
+                "session_summaries": "",
+                "raw_memories": [],
+                "first_time": True
+            }
+
+    def _extract_factual_memory(self, memories: List[Dict[str, Any]]) -> str:
+        """
+        Extract factual memory: stress triggers, patterns, solutions that worked.
+        """
+        if not memories:
+            return ""
+        
+        factual_items = []
+        
+        for memory in memories:
+            memory_text = memory.get("memory", "")
+            
+            # Look for stress triggers
+            if any(word in memory_text.lower() for word in 
+                ["stress", "trigger", "worried", "anxious", "pressure", "overwhelm"]):
+                factual_items.append(f"• Stress trigger: {memory_text[:150]}")
+            
+            # Look for solutions
+            if any(word in memory_text.lower() for word in 
+                ["helped", "solution", "strategy", "approach", "worked", "effective"]):
+                factual_items.append(f"• Effective strategy: {memory_text[:150]}")
+            
+            # Look for patterns
+            if any(word in memory_text.lower() for word in 
+                ["pattern", "usually", "often", "always", "habit", "recurring"]):
+                factual_items.append(f"• Pattern: {memory_text[:150]}")
+        
+        return "\n".join(factual_items[:10]) if factual_items else ""
+
+    def _extract_session_summaries(self, memories: List[Dict[str, Any]]) -> str:
+        """
+        Extract session summaries: what was discussed, what was decided.
+        """
+        if not memories:
+            return ""
+        
+        summaries = []
+        
+        for i, memory in enumerate(memories[:5], 1):  # Last 5 sessions
+            memory_text = memory.get("memory", "")
+            metadata = memory.get("metadata", {})
+            timestamp = metadata.get("session_ended_at", "N/A")
+            
+            summary = f"Session {i} ({timestamp}): {memory_text[:200]}"
+            summaries.append(summary)
+        
+        return "\n".join(summaries) if summaries else ""
+
+    def get_session_count(self, student_id: str) -> int:
+        """Get total number of sessions for a student."""
+        try:
+            results = self.client.search(
+                query="session",
+                filters={"user_id": student_id},
+                top_k=100
+            )
+            memories = results.get("results", []) if results else []
+            return len(memories)
+        except Exception as e:
+            print(f"⚠️  Error getting session count: {str(e)}")
+            return 0
 
 
 # Singleton instance

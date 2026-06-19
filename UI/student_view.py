@@ -60,15 +60,29 @@ def render_student_view():
                     if st.session_state.selected_student_id:
                         _save_current_session_to_mem0()
                     
-                    # Start fresh session for new student
+                    # START FRESH SESSION FOR NEW STUDENT
                     st.session_state.selected_student_id = new_student_id
                     st.session_state.selected_label = selected_label
-                    st.session_state.current_session_id = str(uuid.uuid4())  # NEW SESSION
+                    st.session_state.current_session_id = str(uuid.uuid4())
                     st.session_state.session_start_time = datetime.now()
                     
-                    # Clear current student's chat history when switching
+                    # Clear chat history
                     if new_student_id not in st.session_state.student_histories:
                         st.session_state.student_histories[new_student_id] = []
+                    
+                    # 🆕 LOAD MEMORY CONTEXT FOR THIS STUDENT
+                    try:
+                        from services.memory_integration import get_memory_integration_service
+                        memory_service = get_memory_integration_service()
+                        student_name = selected_label.split('(')[0].strip()
+                        memory_ctx = memory_service.prepare_memory_context(
+                            new_student_id,
+                            student_name
+                        )
+                        st.session_state.student_memory_context = memory_ctx
+                    except Exception as e:
+                        print(f"⚠️  Could not load memory context: {str(e)}")
+                        st.session_state.student_memory_context = None
                     
                     st.rerun()
             else:
@@ -81,6 +95,14 @@ def render_student_view():
             st.divider()
             st.markdown("**Current Student:**")
             st.write(st.session_state.selected_label)
+            
+            # Show memory context info - Session number and previous sessions
+            if "student_memory_context" in st.session_state and st.session_state.student_memory_context:
+                ctx = st.session_state.student_memory_context
+                if not ctx["is_first_session"]:
+                    st.caption(f"📊 Session #{ctx['session_number']} | {ctx['total_previous_sessions']} previous")
+                else:
+                    st.caption("✨ First time student!")
             
             # Session info
             if st.session_state.session_start_time:
@@ -108,7 +130,7 @@ def render_student_view():
             with col2:
                 st.info(f"Messages: {len(current_history)}")
             
-            # NEW: End Session Button
+            # End Session Button
             st.divider()
             if st.button("🛑 End Session", use_container_width=True, type="secondary"):
                 _save_current_session_to_mem0()

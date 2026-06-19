@@ -8,7 +8,9 @@ from prompts.system_prompts import (
     get_knowledge_base_system_prompt,
     get_general_question_system_prompt,
     get_off_topic_response,
-    validate_input
+    validate_input,
+    get_memory_aware_system_prompt,
+    get_briefing_system_prompt
 )
 import json
 
@@ -334,77 +336,21 @@ def classify_question(question: str, student_id: str) -> dict:
 
 
 # ============================================================================
-# MAIN AGENT BUILDER
+# HELPER FUNCTION - Execute Student Data Tools (FIX FOR WARNING)
 # ============================================================================
 
-def build_conversation_agent(*, student_id: str = "", student_name: str = ""):
+def _execute_student_data_tools(tools_to_use: list, parameters: dict) -> str:
     """
-    Build a conversation agent with proper routing and guardrails
+    Execute student data tools and return formatted results.
+    This function was missing - now defined!
+    
+    Args:
+        tools_to_use: List of tool names to execute ("profile", "attendance", "scores", "schedule")
+        parameters: Dict with student_id
+    
+    Returns:
+        Formatted string with tool results
     """
-    
-    llm = get_llm()
-    
-    tools_map = {
-        "attendance": get_attendance_data,
-        "scores": get_exam_scores,
-        "schedule": get_exam_schedule,
-        "profile": get_student_roster,
-        "search_knowledge_base": search_knowledge_base,
-    }
-    
-    def run(user_message: str, history: list[dict]) -> str:
-        """Process user message and generate response"""
-        
-        try:
-            # Validate input
-            is_valid, error_message = validate_input(user_message)
-            if not is_valid:
-                return f"⚠️ {error_message}"
-            
-            print(f"\n{'='*70}")
-            print(f"📨 NEW MESSAGE FROM STUDENT: {student_name}")
-            print(f"Message: {user_message}")
-            print(f"{'='*70}\n")
-            
-            # Classify question
-            classification = classify_question(user_message, student_id)
-            question_type = classification["type"]
-            tools_to_use = classification["tools_to_use"]
-            parameters = classification["parameters"]
-            confidence = classification["confidence"]
-            
-            print(f"📊 Classification: {question_type.upper()} (confidence: {confidence:.1%})")
-            print(f"   Tools: {tools_to_use}\n")
-            
-            # Handle by type
-            if question_type == "off_topic":
-                return get_off_topic_response()
-            
-            elif question_type == "student_data":
-                return _answer_student_question(llm, user_message, history, tools_to_use, student_id, student_name)
-            
-            elif question_type == "knowledge_base":
-                return _answer_knowledge_base_question(user_message)
-            
-            else:  # general
-                return _answer_general_question(llm, user_message, history, student_name)
-        
-        except Exception as e:
-            print(f"❌ Error in agent: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return f"I apologize, but I encountered an error: {str(e)}"
-    
-    return run
-
-
-# ============================================================================
-# HANDLER FUNCTIONS
-# ============================================================================
-
-def _answer_student_question(llm, user_message: str, history: list[dict], tools_to_use: list, student_id: str, student_name: str) -> str:
-    """Handle student data questions"""
-    
     tools_map = {
         "attendance": get_attendance_data,
         "scores": get_exam_scores,
@@ -412,8 +358,9 @@ def _answer_student_question(llm, user_message: str, history: list[dict], tools_
         "profile": get_student_roster,
     }
     
-    # Fetch data from tools
+    student_id = parameters.get("student_id", "")
     tool_results = {}
+    
     for tool_name in tools_to_use:
         if tool_name in tools_map:
             try:
@@ -423,56 +370,110 @@ def _answer_student_question(llm, user_message: str, history: list[dict], tools_
                 tool_results[tool_name] = f"Error fetching {tool_name}: {str(e)}"
     
     # Format tool results
-    tool_results_text = "\n\n".join([
+    if not tool_results:
+        return "No tool results available."
+    
+    formatted_results = "\n\n".join([
         f"📌 {name.upper()}:\n{result}"
         for name, result in tool_results.items()
     ])
     
-    # Get system prompt
-    system_prompt = get_student_data_system_prompt(
+    return formatted_results
+
+
+# ============================================================================
+# MAIN AGENT BUILDER - WITH MEMORY
+# ============================================================================
+
+def build_conversation_agent(student_id: str, student_name: str):
+    """
+    Build conversation agent with memory context injected.
+    
+    INCLUDES:
+    - Student's memory context (previous sessions, patterns, triggers)
+    - Personalized system prompt based on session number
+    - Session-aware responses
+    - Briefing capability for student history
+    """
+    from services.memory_integration import get_memory_integration_service
+    
+    # Get memory context for this student
+    memory_service = get_memory_integration_service()
+    memory_context = memory_service.prepare_memory_context(student_id, student_name)
+    
+    print(f"\n{'='*70}")
+    print(f"🧠 AGENT INITIALIZATION WITH MEMORY")
+    print(f"   Student: {student_name} ({student_id})")
+    print(f"   Session: {memory_context['session_number']}")
+    print(f"   Previous Sessions: {memory_context['total_previous_sessions']}")
+    print(f"   First Time: {memory_context['is_first_session']}")
+    print(f"{'='*70}\n")
+    
+    # Build the memory-aware system prompt
+    system_prompt = get_memory_aware_system_prompt(
         student_name=student_name,
-        student_data_text=tool_results_text
+        memory_context=memory_context
     )
     
-    messages = [SystemMessage(content=system_prompt)]
+    llm = get_llm()
     
-    if history:
-        for turn in history:
+    def agent_function(user_input: str, chat_history: list) -> str:
+        """Execute agent with memory-aware context"""
+        
+        # Check for briefing request
+        briefing_keywords = ["tell me about", "what do you know", "briefing", "summary"]
+        is_briefing_request = any(
+            keyword in user_input.lower() for keyword in briefing_keywords
+        )
+        
+        if is_briefing_request:
+            # Use special briefing prompt
+            briefing = memory_service.format_memory_briefing(memory_context)
+            briefing_system_prompt = get_briefing_system_prompt(briefing)
+            messages = [SystemMessage(content=briefing_system_prompt)]
+        else:
+            # Use regular memory-aware system prompt
+            messages = [SystemMessage(content=system_prompt)]
+        
+        # Add chat history
+        for turn in chat_history:
             messages.append(HumanMessage(content=turn["user"]))
             messages.append(AIMessage(content=turn["assistant"]))
+        
+        # Add current input
+        messages.append(HumanMessage(content=user_input))
+        
+        # Classify the question to route to right tools
+        classification = classify_question(user_input, student_id)
+        
+        # Determine which system prompt to use based on question type
+        if classification["type"] == "student_data":
+            tools_result = _execute_student_data_tools(
+                classification["tools_to_use"],
+                classification["parameters"]
+            )
+            messages[-1] = HumanMessage(
+                content=f"{user_input}\n\n[TOOL RESULTS]\n{tools_result}"
+            )
+        
+        elif classification["type"] == "knowledge_base":
+            query = classification["parameters"].get("query", user_input)
+            kb_result = search_knowledge_base(query)
+            messages[-1] = HumanMessage(
+                content=f"{user_input}\n\n[KNOWLEDGE BASE RESULT]\n{kb_result}"
+            )
+        
+        elif classification["type"] == "off_topic":
+            messages[-1] = HumanMessage(
+                content=f"{user_input}\n\n[RESPONSE REQUIRED]\nPlease provide an off-topic response."
+            )
+            return get_off_topic_response()
+        
+        # Get LLM response
+        try:
+            response = llm.invoke(messages)
+            return response.content
+        except Exception as e:
+            return f"I encountered an error: {str(e)}"
     
-    messages.append(HumanMessage(content=user_message))
-    
-    response = llm.invoke(messages).content
-    return response
-
-
-def _answer_knowledge_base_question(user_message: str) -> str:
-    """Handle knowledge base questions using RAG"""
-    
-    try:
-        result = search_knowledge_base.invoke({"query": user_message})
-        return result
-    except Exception as e:
-        print(f"❌ Error in KB search: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return f"I encountered an error while searching the knowledge base: {str(e)}"
-
-
-def _answer_general_question(llm, user_message: str, history: list[dict], student_name: str) -> str:
-    """Handle general questions"""
-    
-    system_prompt = get_general_question_system_prompt(student_name=student_name)
-    
-    messages = [SystemMessage(content=system_prompt)]
-    
-    if history:
-        for turn in history:
-            messages.append(HumanMessage(content=turn["user"]))
-            messages.append(AIMessage(content=turn["assistant"]))
-    
-    messages.append(HumanMessage(content=user_message))
-    
-    response = llm.invoke(messages).content
-    return response
+    return agent_function
