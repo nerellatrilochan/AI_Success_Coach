@@ -1,6 +1,12 @@
+# At the end of main.py
+
 import streamlit as st
-from UI.student_view import render_student_view
 
-st.set_page_config(page_title="Success Coach AI", page_icon="🎓", layout="wide")
+page = st.sidebar.radio("Navigation", ["Student Chat", "Signal Dashboard"])
 
-render_student_view()
+if page == "Student Chat":
+    from UI.student_view import render_student_view
+    render_student_view()
+elif page == "Signal Dashboard":
+    from UI.signal_dashboard import render_signal_dashboard
+    render_signal_dashboard()
